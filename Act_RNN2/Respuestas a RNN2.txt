@@ -1,0 +1,22 @@
+Componentes matematicos descritos en los acertijos:
+
+"Soy la novedad pura, el pulso del instante..."
+Xt -> Es la entrada (input) en el tiempo actual.
+
+
+$h_{t-1}$"El fantasma del pasado... el resumen de todo lo que hemos vivido."
+h(t-1) -> Es el estado oculto anterior. Es la "memoria" de la red
+
+
+$W_{hh}$"Peajes inmutables, barreras que multiplican nuestra importancia."
+W(hx) y W(hh) -> Son las matrices de pesos.
+
+$b$"Un pequeño desvío inevitable."
+b -> Es el sesgo (bias). Es un valor que se suma para permitir que la red se ajuste mejor a los datos
+
+"Muro curvo que nos comprime entre el -1 y el 1."
+tanh -> Es la función de activación tangente hiperbólica. Su forma de "S" curva escala 
+cualquier valor de entrada a un rango estricto entre -1 y 1
+
+"Nazco yo, una nueva identidad... listo para ser el fantasma de tu mañana."
+h(t) -> Es el nuevo estado oculto
