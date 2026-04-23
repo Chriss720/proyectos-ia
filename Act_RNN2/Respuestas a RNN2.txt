@@ -1,4 +1,4 @@
-Componentes matematicos descritos en los acertijos:
+Componentes matematicos descritos en los acertijos (2.1):
 
 "Soy la novedad pura, el pulso del instante..."
 Xt -> Es la entrada (input) en el tiempo actual.
