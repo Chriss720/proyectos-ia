@@ -7,11 +7,12 @@ from typing import List, Optional, Tuple
 import pygame
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import StandardScaler
 
 # Opcional: para graficar los datos en 2D y 3D
 import matplotlib
-# Configuramos backend para ventanas interactivas (TkAgg funciona en la mayoría de sistemas)
+# Configuramos backend para ventanas interactivas
 try:
     matplotlib.use("TkAgg")
 except Exception:
@@ -20,67 +21,53 @@ except Exception:
     except Exception:
         pass  # Usa el backend por defecto
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401, necesario para activar 3D en matplotlib
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-# Activamos modo interactivo para que las ventanas no bloqueen el juego
 plt.ion()
 
-
-# Ventana base y factor de escala
 BASE_W, BASE_H = 1080, 720
 WINDOW_FRACTION = 0.97
 EXTRA_SCALE = 1.1
-
 
 @dataclass
 class Sample:
     velocidad_bala: float
     distancia: float
-    salto: int  # 1 si saltó EN ESE FRAME, 0 si no
-
+    altura_bala: float
+    accion: int  # 0: nada, 1: saltar, 2: agacharse
 
 class Juego:
     def __init__(self) -> None:
         pygame.init()
 
-        # Ventana fija (sin redimensionamiento automático) para evitar
-        # problemas en pantallas muy grandes / 2K / 4K.
         self._flags = 0
         self._fullscreen = False
 
-        # Tamaño fijo de ventana
         start_w = BASE_W
         start_h = BASE_H
         self.pantalla = pygame.display.set_mode((start_w, start_h), self._flags)
-        pygame.display.set_caption("Juego: Bala + salto + MLP (solo memoria)")
+        pygame.display.set_caption("Juego: Bala + salto + agacharse + MLP + Tree")
 
-        # Colores
         self.BLANCO = (255, 255, 255)
         self.NEGRO = (0, 0, 0)
         self.GRIS = (200, 200, 200)
         self.AMARILLO = (255, 220, 120)
 
-        # Estado global
         self.corriendo = True
         self.modo_auto = False
+        self.usar_tree = False # False = MLP, True = Tree
 
-        # Datos / modelo
         self.datos_modelo: List[Sample] = []
-        self.modelo: Optional[MLPClassifier] = None
+        self.modelo_mlp: Optional[MLPClassifier] = None
+        self.modelo_tree: Optional[DecisionTreeClassifier] = None
         self.scaler: Optional[StandardScaler] = None
         self.modelo_entrenado = False
-        # Caso especial: cuando solo hay una clase en los datos
-        # (0 = nunca salto, 1 = siempre salto).
         self.clase_unica: Optional[int] = None
-        # Debug / info del modelo en tiempo real
-        self.ultima_proba_salto: Optional[float] = None
+        self.ultima_accion_auto: Optional[int] = None
 
-        # Parámetros de decisión
         self.decision_window = 500
-        self.decision_record_every = 3
         self._decision_frame_counter = 0
 
-        # Geometría / física (se rellenan en _apply_resolution)
         self.w, self.h = start_w, start_h
         self.scale = 1.0
         self.margin = 50
@@ -88,11 +75,11 @@ class Juego:
         self.player_size = (32, 48)
         self.bullet_size = (16, 16)
         self.ship_size = (64, 64)
-        # Velocidad de desplazamiento del fondo
         self.fondo_speed = 3
 
         self.salto = False
         self.en_suelo = True
+        self.agachado = False
         self.salto_vel_inicial = 15.0
         self.gravedad = 1.0
         self.salto_vel = self.salto_vel_inicial
@@ -101,7 +88,6 @@ class Juego:
         self.frame_speed = 10
         self.frame_count = 0
 
-        # Velocidad base de la bala (en píxeles/frame, negativa porque va de der→izq)
         self.velocidad_bala = -12
         self.bala_disparada = False
         self.fondo_x1 = 0
@@ -110,10 +96,8 @@ class Juego:
         self._apply_resolution(start_w, start_h, reset_positions=True)
         self._reset_estado_juego()
 
-    # ----------------- resolución / assets -----------------
     def _apply_resolution(self, w: int, h: int, reset_positions: bool) -> None:
         self.w, self.h = int(w), int(h)
-
         self.scale = min(self.w / BASE_W, self.h / BASE_H) * EXTRA_SCALE
         self.scale = max(1.0, self.scale)
 
@@ -194,14 +178,13 @@ class Juego:
             self.pantalla = pygame.display.set_mode((w, h), pygame.FULLSCREEN)
             self._apply_resolution(w, h, reset_positions=True)
         else:
-            # Volver a ventana fija BASE_W x BASE_H
             self.pantalla = pygame.display.set_mode((BASE_W, BASE_H), self._flags)
             self._apply_resolution(BASE_W, BASE_H, reset_positions=True)
         self._reset_estado_juego()
 
-    # ----------------- estado juego / modelo -----------------
     def _reset_estado_juego(self) -> None:
         self.jugador.x, self.jugador.y = self.margin, self.ground_y
+        self.jugador.height = self.player_size[1]
         self.nave.x, self.nave.y = self.w - int(100 * self.scale), self.ground_y
         self.bala.x = self.w - self.margin
         self.bala.y = self.ground_y + int(10 * self.scale)
@@ -209,109 +192,66 @@ class Juego:
         self.velocidad_bala = int(-10 * self.scale)
         self.salto = False
         self.en_suelo = True
+        self.agachado = False
         self.salto_vel = self.salto_vel_inicial
         self._decision_frame_counter = 0
         self.fondo_x1 = 0
         self.fondo_x2 = self.w
 
     def _reset_modelo(self) -> None:
-        self.modelo = None
+        self.modelo_mlp = None
+        self.modelo_tree = None
         self.scaler = None
         self.modelo_entrenado = False
         self.clase_unica = None
 
-    # ----------------- export / gráficas -----------------
-
     def exportar_datos_csv(self) -> str:
-        """
-        Exporta el contenido de self.datos_modelo a un CSV sencillo.
-        Devuelve un mensaje con la ruta del archivo o el motivo del fallo.
-        """
         if not self.datos_modelo:
             return "No hay datos para exportar."
-
         base = os.path.dirname(__file__)
         ruta = os.path.join(base, "datos_mlp.csv")
-
         try:
             with open(ruta, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["velocidad_bala", "distancia", "salto"])
+                writer.writerow(["velocidad_bala", "distancia", "altura_bala", "accion"])
                 for s in self.datos_modelo:
-                    writer.writerow([s.velocidad_bala, s.distancia, s.salto])
+                    writer.writerow([s.velocidad_bala, s.distancia, s.altura_bala, s.accion])
         except Exception as e:
             return f"Error al guardar CSV: {e}"
-
         return f"CSV guardado en datos_mlp.csv ({len(self.datos_modelo)} filas)."
 
     def graficar_datos_2d(self) -> str:
-        """
-        Grafica velocidad_bala vs distancia en 2D,
-        coloreando por salto (0 / 1).
-        Abre una ventana interactiva (desde el hilo principal, no bloqueante).
-        """
         if not self.datos_modelo:
             return "No hay datos para graficar."
-
         xs = [s.distancia for s in self.datos_modelo]
         ys = [s.velocidad_bala for s in self.datos_modelo]
-        cs = ["red" if s.salto == 1 else "blue" for s in self.datos_modelo]
+        # Colores: 0=azul (nada), 1=rojo (salto), 2=verde (agacharse)
+        colores = {0: "blue", 1: "red", 2: "green"}
+        cs = [colores[s.accion] for s in self.datos_modelo]
 
-        # Cerrar figura anterior si existe para evitar acumulación
-        fig_num = plt.figure("Datos MLP - 2D", figsize=(8, 6)).number
+        fig_num = plt.figure("Datos Modelo - 2D", figsize=(8, 6)).number
         plt.figure(fig_num)
         plt.clf()
-        
         ax = plt.gca()
         ax.scatter(xs, ys, c=cs, alpha=0.6, edgecolors="k", s=30)
         ax.set_xlabel("Distancia jugador-bala")
         ax.set_ylabel("Velocidad bala")
-        ax.set_title("Datos entrenamiento MLP (rojo=salto, azul=no salto)")
+        ax.set_title("Datos (Azul=Nada, Rojo=Salto, Verde=Agacharse)")
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        # Mostrar sin bloquear (modo interactivo ya está activado con plt.ion())
         plt.show(block=False)
-        plt.draw()  # Forzar actualización de la ventana
+        plt.draw()
+        return "Mostrando gráfica 2D interactiva."
 
-        return "Mostrando gráfica 2D interactiva (puedes rotar/zoom)."
-
-    def graficar_datos_3d(self) -> str:
-        """
-        Grafica velocidad_bala vs distancia vs índice de tiempo (frame) en 3D,
-        coloreando por salto (0 / 1).
-        Abre una ventana interactiva (desde el hilo principal, no bloqueante).
-        """
-        if not self.datos_modelo:
-            return "No hay datos para graficar."
-
-        xs = [s.distancia for s in self.datos_modelo]
-        ys = [s.velocidad_bala for s in self.datos_modelo]
-        zs = list(range(len(self.datos_modelo)))  # eje "tiempo" aproximado
-        cs = ["red" if s.salto == 1 else "blue" for s in self.datos_modelo]
-
-        # Cerrar figura anterior si existe para evitar acumulación
-        fig = plt.figure("Datos MLP - 3D", figsize=(8, 6))
-        plt.clf()
-
-        # Crear eje 3D correctamente desde la figura
-        ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(xs, ys, zs, c=cs, alpha=0.6, edgecolors="k", s=30)
-        ax.set_xlabel("Distancia")
-        ax.set_ylabel("Velocidad bala")
-        ax.set_zlabel("Índice (tiempo aproximado)")
-        ax.set_title("Datos entrenamiento MLP 3D (rojo=salto, azul=no salto)")
-        plt.tight_layout()
-        # Mostrar sin bloquear (modo interactivo ya está activado con plt.ion())
-        plt.show(block=False)
-        plt.draw()  # Forzar actualización de la ventana
-
-        return "Mostrando gráfica 3D interactiva (puedes rotar/zoom)."
-
-    # ----------------- bala / salto -----------------
     def disparar_bala(self) -> None:
         if not self.bala_disparada:
-            # Aumentamos ligeramente el rango de velocidad para que el juego sea más rápido.
             self.velocidad_bala = int(random.randint(-12, -6) * self.scale)
+            # Altura aleatoria para obligar a agacharse o saltar
+            # Alta: requiere agacharse. Baja: requiere saltar.
+            altura_baja = self.ground_y + int(25 * self.scale)
+            altura_alta = self.ground_y + int(5 * self.scale)
+            
+            self.bala.y = random.choice([altura_baja, altura_alta])
             self.bala_disparada = True
 
     def reset_bala(self) -> None:
@@ -319,7 +259,7 @@ class Juego:
         self.bala_disparada = False
 
     def iniciar_salto(self) -> None:
-        if self.en_suelo:
+        if self.en_suelo and not self.agachado:
             self.salto = True
             self.en_suelo = False
 
@@ -333,25 +273,37 @@ class Juego:
                 self.salto_vel = self.salto_vel_inicial
                 self.en_suelo = True
 
-    # ----------------- datos / ML -----------------
+    def iniciar_agacharse(self) -> None:
+        if self.en_suelo and not self.agachado:
+            self.agachado = True
+            # Reducimos la altura a la mitad y bajamos el rectángulo
+            self.jugador.height = self.player_size[1] // 2
+            self.jugador.y = self.ground_y + self.player_size[1] // 2
+
+    def levantar(self) -> None:
+        if self.agachado:
+            self.agachado = False
+            self.jugador.height = self.player_size[1]
+            self.jugador.y = self.ground_y
+
     def registrar_decision_manual(self) -> None:
-        # IMPORTANTE: aquí NO debemos filtrar por en_suelo.
-        # En el mismo frame en que pulsas ESPACIO se llama a iniciar_salto(),
-        # que pone en_suelo = False antes de registrar, y se perdería ese frame.
-        # Solo comprobamos que la bala esté disparada.
         if not self.bala_disparada:
             return
         distancia = abs(self.jugador.x - self.bala.x)
-        # Entrenamos para que el modelo imite TU estilo:
-        # registramos desde que la bala sale, en cada frame relevante.
-        # Y marcamos salto = 1 DURANTE TODO EL TIEMPO QUE EL MUÑECO
-        # ESTÁ EN EL AIRE (no en_suelo).
-        salto_label = 0 if self.en_suelo else 1
+        
+        if not self.en_suelo:
+            accion = 1 # Salto
+        elif self.agachado:
+            accion = 2 # Agacharse
+        else:
+            accion = 0 # Nada
+
         self.datos_modelo.append(
             Sample(
                 velocidad_bala=float(self.velocidad_bala),
                 distancia=float(distancia),
-                salto=salto_label,
+                altura_bala=float(self.bala.y),
+                accion=accion,
             )
         )
 
@@ -359,73 +311,73 @@ class Juego:
         samples = list(self.datos_modelo)
         if len(samples) < 80:
             return False, "Necesitas más datos (>= 80). Juega en MANUAL."
-        X = [[s.velocidad_bala, s.distancia] for s in samples]
-        y = [s.salto for s in samples]
+        X = [[s.velocidad_bala, s.distancia, s.altura_bala] for s in samples]
+        y = [s.accion for s in samples]
         clases = sorted(set(y))
-        # Si solo hay una clase, entrenamos un "modelo trivial"
-        # que siempre devuelve esa clase, en lugar de marcar error.
         if len(clases) < 2:
             self._reset_modelo()
             self.clase_unica = int(clases[0])
             self.modelo_entrenado = True
-            tipo = "SIEMPRE NO-SALTA (0)" if self.clase_unica == 0 else "SIEMPRE SALTA (1)"
-            return True, f"Modelo trivial entrenado: {tipo}. Junta datos de ambas clases para un modelo más fino."
+            return True, f"Modelo trivial entrenado: Siempre hace la acción {self.clase_unica}."
+        
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y
         )
         scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
-        clf = MLPClassifier(
-            hidden_layer_sizes=(3, 3),
+        X_train_s = scaler.fit_transform(X_train)
+        X_test_s = scaler.transform(X_test)
+        
+        # Entrenar MLP
+        clf_mlp = MLPClassifier(
+            hidden_layer_sizes=(5, 5),
             activation="relu",
             solver="adam",
-            max_iter=300000,
+            max_iter=50000,
             random_state=42,
         )
-        clf.fit(X_train, y_train)
-        acc = clf.score(X_test, y_test)
+        clf_mlp.fit(X_train_s, y_train)
+        acc_mlp = clf_mlp.score(X_test_s, y_test)
+
+        # Entrenar Árbol de decisión
+        clf_tree = DecisionTreeClassifier(max_depth=5, random_state=42)
+        clf_tree.fit(X_train_s, y_train)
+        acc_tree = clf_tree.score(X_test_s, y_test)
+
         self._reset_modelo()
         self.scaler = scaler
-        self.modelo = clf
+        self.modelo_mlp = clf_mlp
+        self.modelo_tree = clf_tree
         self.modelo_entrenado = True
-        return True, f"MLP entrenado. Accuracy test ≈ {acc:.3f}"
+        return True, f"Entrenado. Acc MLP: {acc_mlp:.2f} | Acc Tree: {acc_tree:.2f}"
 
-    def decision_auto_saltar(self) -> bool:
+    def decision_auto(self) -> int:
         if not self.modelo_entrenado:
-            return False
-        if (not self.bala_disparada) or (not self.en_suelo):
-            return False
+            return 0
+        if not self.bala_disparada:
+            return 0
+        
         distancia = abs(self.jugador.x - self.bala.x)
-        # En modo AUTO evaluamos desde que la bala sale,
-        # para que el modelo también aprenda a "no hacer nada"
-        # cuando la bala aún está lejos.
 
-        # Caso especial: modelo trivial de una sola clase
-        if self.clase_unica is not None and self.modelo is None:
-            proba_salto = 1.0 if self.clase_unica == 1 else 0.0
-            self.ultima_proba_salto = proba_salto
-            return self.clase_unica == 1
+        if self.clase_unica is not None:
+            self.ultima_accion_auto = self.clase_unica
+            return self.clase_unica
 
-        # Caso normal: modelo MLP con scaler
-        if self.modelo is None or self.scaler is None:
-            return False
+        if self.scaler is None:
+            return 0
 
-        X = [[float(self.velocidad_bala), float(distancia)]]
+        X = [[float(self.velocidad_bala), float(distancia), float(self.bala.y)]]
         Xs = self.scaler.transform(X)
-        proba_salto = None
-        if hasattr(self.modelo, "predict_proba"):
-            proba_salto = float(self.modelo.predict_proba(Xs)[0][1])
-            decision = proba_salto >= 0.5
+        
+        if self.usar_tree and self.modelo_tree is not None:
+            pred = int(self.modelo_tree.predict(Xs)[0])
+        elif not self.usar_tree and self.modelo_mlp is not None:
+            pred = int(self.modelo_mlp.predict(Xs)[0])
         else:
-            pred = int(self.modelo.predict(Xs)[0])
-            proba_salto = 1.0 if pred == 1 else 0.0
-            decision = pred == 1
-        # Guardamos la última probabilidad para mostrarla en pantalla.
-        self.ultima_proba_salto = proba_salto
-        return decision
+            pred = 0
+            
+        self.ultima_accion_auto = pred
+        return pred
 
-    # ----------------- menú -----------------
     def _dibujar_menu(self, msg: str = "") -> None:
         self.pantalla.fill(self.NEGRO)
         titulo = self.fuente.render("MENÚ", True, self.BLANCO)
@@ -433,8 +385,9 @@ class Juego:
 
         opciones = [
             "M - Manual (reinicia dataset y borra modelo)",
-            "A - Auto (usa MLP; sin modelo NO salta)",
-            "T - Entrenar MLP",
+            "A - Auto (usa modelo; sin modelo NO hace nada)",
+            "L - Cambiar Modelo Auto (MLP / Tree)",
+            "T - Entrenar Modelos",
             "C - Exportar datos a CSV",
             "F - Fullscreen (toggle)",
             "Q - Salir",
@@ -449,9 +402,10 @@ class Juego:
             y += line_h + pad
 
         y += int(8 * self.scale)
+        modelo_activo = "Árbol de Decisión" if self.usar_tree else "MLP (Red Neuronal)"
         estado = [
-            f"Memoria: {len(self.datos_modelo)} | Modelo: {'sí' if self.modelo_entrenado else 'no'}",
-            f"Resolución: {self.w}x{self.h} | scale≈{self.scale:.2f} | ventana_decisión≈{self.decision_window}",
+            f"Memoria: {len(self.datos_modelo)} | Modelos: {'sí' if self.modelo_entrenado else 'no'}",
+            f"Modelo Activo en Auto: {modelo_activo}",
         ]
         for line in estado:
             t = self.fuente_chica.render(line, True, self.GRIS)
@@ -475,8 +429,6 @@ class Juego:
                     self.corriendo = False
                     esperando = False
                     break
-                # Ya no reaccionamos a cambios de tamaño de ventana,
-                # la ventana es fija.
                 if e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_m:
                         self.modo_auto = False
@@ -487,12 +439,14 @@ class Juego:
                         break
                     if e.key == pygame.K_a:
                         if not self.modelo_entrenado:
-                            msg = "Primero entrena el MLP (T) en esta sesión."
+                            msg = "Primero entrena los modelos (T) en esta sesión."
                         else:
                             self.modo_auto = True
                             self._reset_estado_juego()
                             esperando = False
                             break
+                    if e.key == pygame.K_l:
+                        self.usar_tree = not self.usar_tree
                     if e.key == pygame.K_t:
                         ok, info = self.entrenar_modelo()
                         msg = info if ok else f"Error: {info}"
@@ -505,7 +459,6 @@ class Juego:
                         esperando = False
                         return
 
-    # ----------------- render / loop -----------------
     def _update_frame(self) -> None:
         self.fondo_x1 -= self.fondo_speed
         self.fondo_x2 -= self.fondo_speed
@@ -521,7 +474,14 @@ class Juego:
             self.current_frame = (self.current_frame + 1) % len(self.jugador_frames)
             self.frame_count = 0
 
-        self.pantalla.blit(self.jugador_frames[self.current_frame], (self.jugador.x, self.jugador.y))
+        # Dibujar jugador (escalar a la mitad si está agachado)
+        frame_actual = self.jugador_frames[self.current_frame]
+        if self.agachado:
+            img_agachada = pygame.transform.scale(frame_actual, (self.player_size[0], self.player_size[1] // 2))
+            self.pantalla.blit(img_agachada, (self.jugador.x, self.jugador.y))
+        else:
+            self.pantalla.blit(frame_actual, (self.jugador.x, self.jugador.y))
+            
         self.pantalla.blit(self.nave_img, (self.nave.x, self.nave.y))
 
         if self.bala_disparada:
@@ -530,18 +490,13 @@ class Juego:
             self.reset_bala()
         self.pantalla.blit(self.bala_img, (self.bala.x, self.bala.y))
 
-        # Si hay colisión, solo reiniciamos el estado del juego
-        # pero NO volvemos al menú para evitar el efecto de
-        # "se cierra y se abre" constantemente.
         if self.jugador.colliderect(self.bala):
             self._reset_estado_juego()
 
-        # Info del modelo en tiempo real (solo si hay modelo entrenado)
-        if self.modelo_entrenado and self.modo_auto and self.ultima_proba_salto is not None:
-            txt = self.fuente_chica.render(
-                f"proba_salto≈{self.ultima_proba_salto:.2f}", True, self.AMARILLO
-            )
-            # Esquina superior izquierda, con un pequeño margen.
+        if self.modelo_entrenado and self.modo_auto and self.ultima_accion_auto is not None:
+            txt_accion = {0: "Nada", 1: "Salto", 2: "Agacharse"}.get(self.ultima_accion_auto, "Nada")
+            modelo_str = "Tree" if self.usar_tree else "MLP"
+            txt = self.fuente_chica.render(f"Acción ({modelo_str}): {txt_accion}", True, self.AMARILLO)
             self.pantalla.blit(txt, (10, 10))
 
     def loop(self) -> None:
@@ -549,35 +504,40 @@ class Juego:
         self.mostrar_menu()
 
         while self.corriendo:
-            salto_frame = False
-
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.corriendo = False
-                # La ventana es de tamaño fijo: ignoramos eventos VIDEORESIZE.
                 elif e.type == pygame.KEYDOWN:
                     if e.key == pygame.K_q:
                         self.corriendo = False
                     elif e.key in (pygame.K_ESCAPE, pygame.K_p):
-                        # Reiniciamos el estado del juego (incluida la bala)
-                        # y volvemos al menú.
                         self._reset_estado_juego()
                         self.mostrar_menu()
                     elif e.key == pygame.K_f:
                         self._toggle_fullscreen()
-                    elif e.key == pygame.K_SPACE and (not self.modo_auto) and self.en_suelo:
-                        salto_frame = True
+                    elif e.key == pygame.K_SPACE and (not self.modo_auto) and self.en_suelo and not self.agachado:
                         self.iniciar_salto()
+                    elif e.key == pygame.K_DOWN and (not self.modo_auto) and self.en_suelo:
+                        self.iniciar_agacharse()
+                elif e.type == pygame.KEYUP:
+                    if e.key == pygame.K_DOWN and not self.modo_auto:
+                        self.levantar()
 
             if not self.corriendo:
                 break
 
             if self.modo_auto:
-                if self.decision_auto_saltar():
+                accion = self.decision_auto()
+                if accion == 1:
+                    if self.agachado:
+                        self.levantar()
                     self.iniciar_salto()
+                elif accion == 2:
+                    self.iniciar_agacharse()
+                else:
+                    if self.agachado:
+                        self.levantar()
             else:
-                # En modo manual registramos SIEMPRE la decisión de este frame.
-                # Ahora la etiqueta salto=1 cubre TODO el tiempo en el aire.
                 self.registrar_decision_manual()
 
             if self.salto:
@@ -588,16 +548,12 @@ class Juego:
 
             self._update_frame()
             pygame.display.flip()
-            # Aumentamos FPS para que todo el juego se sienta más rápido.
             reloj.tick(45)
 
         pygame.quit()
 
-
 def main() -> None:
     Juego().loop()
 
-
 if __name__ == "__main__":
     main()
-

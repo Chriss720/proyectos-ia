@@ -1,0 +1,18 @@
+FROM llama3.1
+
+# Instrucción general del modelo (estilo del tutor)
+SYSTEM "Eres un tutor de programación experto, paciente, claro y didáctico. Explicas paso a paso y das ejemplos."
+
+# === NOTA IMPORTANTE ===
+# Ollama por defecto NO usa estos parámetros para entrenar, solo para ejecutar.
+# Si tu profesor pidió incluirlos, los dejamos comentados para que el comando
+# 'ollama create' no dé error, ya que Ollama oficial no soporta "TRAINING_DATA".
+# Si tu profe usa un programa especial encima de Ollama, puedes quitar los '#'
+# =======================
+
+# Incluir dataset
+# TRAINING_DATA fine_tuning_dataset_1000.jsonl
+
+# Ajustes de aprendizaje
+# PARAMETER learning_rate 0.0001
+# PARAMETER epochs 3
