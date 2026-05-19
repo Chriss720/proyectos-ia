@@ -3,3 +3,6 @@ Fine-tuning LoRA/token.txt
 
 # Temporales de Google Drive
 .tmp.driveupload/
+
+# Carpetas de datos (imágenes)
+CNN/sportimages/
